@@ -8,27 +8,86 @@
 #include <sys/wait.h>
 
 /********************************************/
-/*           ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ          */
+/*           GLOBAL VARIABLES               */
 /********************************************/
+ 
+const int maxArguments = 10;
+const int BuffSize = 256;
+const int forkError = -1;
+const int forkChild = 0;
+const int execError = -1;
 
-struct PID_list
+struct ChildFIFO
 {
     pid_t PID;
-    struct PID_list *next_process;
+    struct ChildFIFO *next_process;
 };
 
-struct PID_list *head_list;
+struct ChildFIFO *head_list;
 
 /********************************************/
-/*              РЕАЛИЗАЦИЯ ФУНКЦИЙ          */
+/*              FUNCTIONS PROTOTYPES        */
 /********************************************/
 
+void readCmdInputLine(char** line);
+// ---------------------FIFO----------------------------
+void add_elem(pid_t new_PID);
+void delete_head_list();
+int countLength();
+void printAll();
+
+
+//----------------PROCESS FUNCTIONS----------------
+
+void killHeadProcess(int sig);
+char **divideIntoWords(char* line);
+int recognizeCommands(char **args, char commands[maxArguments][BuffSize]);
+void createChildProcess(char **args);
+void readCmdInputLine(char** line);
+void killAllChildren();
+
+
+/*--MAIN--*/
+int main(){
+    char *line = NULL;
+    char **lexemCmdMatrix;
+    system("clear");
+
+    signal(SIGINT, killHeadProcess);
+    printf("\n");
+
+    while(true){
+        char cwd[BuffSize];
+        getcwd(cwd, sizeof(cwd));
+        printf("%s", cwd);
+        readCmdInputLine(&line);
+        if(strcmp(line, "killall")==0){
+            killAllChildren();
+            free(line);
+            break;
+        }
+        else if(strcmp(line, "clear")==0){
+            system("clear");
+            continue;
+        }
+        else if(line[0]!='\0'){
+            lexemCmdMatrix = divideIntoWords(line);
+            createChildProcess(lexemCmdMatrix);
+            free(lexemCmdMatrix);
+        }
+    }
+    return 0;
+}
+
+
 /*------------------------------------------*/
-/* Добавление нового элемента (дочернего процесса) в список */
+/* FUNCTION IMPLEMENTATION                  */
 /*------------------------------------------*/
+
+//--------------CHILDREN FIFO --------------------------------
 void add_elem(pid_t new_PID)
 {
-    struct PID_list *new_list = (struct PID_list *)malloc(sizeof(struct PID_list));
+    struct ChildFIFO *new_list = (struct ChildFIFO *)malloc(sizeof(struct ChildFIFO));
     new_list->PID = new_PID;
     new_list->next_process = NULL;
 
@@ -38,7 +97,7 @@ void add_elem(pid_t new_PID)
     }
     else
     {
-        struct PID_list *current = head_list;
+        struct ChildFIFO *current = head_list;
         while (current->next_process != NULL)
         {
             current = current->next_process;
@@ -48,86 +107,135 @@ void add_elem(pid_t new_PID)
     return;
 }
 
-/*--FIFO--*/
 void delete_head_list(){
     if(head_list==NULL){
         return;
     }
-    struct PID_list *current = head_list;
+    struct ChildFIFO *current = head_list;
     head_list = current->next_process;
     free(current);
     return;
 }
 
-/*--Capture signal---*/
-void Ctrl_plus_C(int sig){
-    // no children
-    if (head_list==NULL){
+int countLength(){
+    struct ChildFIFO *current = head_list;
+    int count = 0;
+    while(current!=NULL){
+        count++;
+        current = current->next_process;
+    }
+    return count;
+}
+
+void printAll(){
+    struct ChildFIFO *current = head_list;
+    int i = 1;
+    printf("\nChildren processes for parent %d:\n", getpid());
+    while(current!=NULL){
+        printf("%d. Child process PID: %d\n", i, current->PID);
+        current = current->next_process;
+        i++;
+    }
+}
+
+//----------------PROCESS FUNCTIONS----------------
+
+/*--Capture signal Ctrl+C---*/
+void killHeadProcess(int sig){ // for Ctrl+C commands
+    char cwd[BuffSize];
+    
+    if (head_list==NULL){ // if no children
         printf("\nParent process killed PID: %d\n", getpid());
         kill(getpid(), SIGTERM);
         waitpid(-1, NULL, 0);
     }
-    else 
+    else // delete the head child
     {
-        struct PID_list *current = head_list;
-        int i = 1;
-        printf("\nChildren processes for parent %d:\n", getpid());
-        while(current!=NULL){
-            printf("%d. Child process PID: %d\n", i, current->PID);
-            current = current->next_process;
-            i++;
-        }  
-        printf("\nThe process %d was killed", head_list->PID); // why head_list??
+        printAll(); // print all children of current parent
+        printf("\nThe process %d was killed", head_list->PID); 
         kill(head_list->PID, SIGKILL);
         waitpid(head_list->PID, NULL, 0);
         delete_head_list();
     }
-    char cwd[256]; // TODO: NO NUMBERS
+    
     getcwd(cwd, sizeof(cwd));
-    printf("\n%s\033[0m \033[38;5;63m$\033[0m", cwd);
+    printf("\n%s$", cwd);
     fflush(stdout);
     return;
 }
 
-/*--Divide the line into distinct lexems--*/
-char **word_division(char* line){
-    int length = strlen(line);
-    char parts = (char)malloc((length+1)*sizeof(char*));
+/*--Divide the line into distinct words--*/
+char **divideIntoWords(char* line){
+    int i = 0;
+    int wordStart = 0;
+    int lastWord = 0;
+    int lengthLine = strlen(line);
+    
+    char **parts = (char **)malloc((lengthLine+1)*sizeof(char*)); // allocate memory for the parts
 
     if(parts==NULL){
         return NULL;
     }
-    int i = 0;
-    int word_start = 0;
-    int word_count = 0;
-    while(i<=length){
-        if(line[i]==''||line=='\0'){
-            if(i>word_start){
-                int word_length = i - word_start;
-                parts[word_count] = (char*)malloc((word_length+1)*sizeof(char));
+    
+    while(i<=lengthLine){
+        if(line[i]=='\0' || line[i]==' '){ // if end of command or argument
+            if(i>wordStart){ // save each word
+                int word_length = i - wordStart;
+                parts[lastWord] = (char*)malloc((word_length+1)*sizeof(char));
 
-                if(parts[word_count]==NULL){
+                if(parts[lastWord]==NULL){
                     return NULL;
                 }
-                strncpy(parts[word_count], &line[word_start], word_length);
-                parts[word_count][word_length] = '\0';
-                word_count++;
+                strncpy(parts[lastWord], &line[wordStart], word_length);
+                parts[lastWord][word_length] = '\0';
+                lastWord++;
             }
-            word_start = i+1;
+            wordStart = i+1;
         }
         i++;
     }
-    parts[word_count] = NULL;
+    parts[lastWord] = NULL;
     return parts;
 }
 
+// collect words into command(s) (by comma separation)
+int recognizeCommands(char **args, char commands[maxArguments][BuffSize]){
+    int i = 0;
+    int counter = 0;
+
+    while(args[i]){
+        int j = 0;
+        while(args[i][j]!='\0')
+            j++;
+        if (args[i][j-1]==','){
+            args[i][j-1] = '\0';
+            strcat(commands[counter], args[i]);
+            counter++;
+            i++;
+            continue;
+        }
+        strcat(commands[counter], args[i]);
+        strcat(commands[counter], " ");
+        i++;
+    }
+
+    counter++;
+    printf("Commands read: %d\n", counter);
+    return counter;
+}
+
 /*--Create the new process--*/
-void create_new_process(char **con_args){
+void createChildProcess(char **args){
     pid_t pid;
-    int success = -1;
-    if(strcmp(con_args[0], "cd")==0){
-        if(con_args[1]!=NULL){
-            if (chdir(con_args[1]!=0)){
+    int success = execError;
+    int cmdRead = 0; // amount of command
+    char** command; // array of command
+    int childAmount = 0;
+
+    // if cd command written 
+    if(strcmp(args[0], "cd")==0){
+        if(args[1]!=NULL){
+            if (chdir(args[1])!=0){
                 printf("Can't change the directory");
             }
         }
@@ -138,52 +246,38 @@ void create_new_process(char **con_args){
         return;
     }
 
-    int counter = 0;
-    char commands[10][256]; // TODO: NO NUMBERS
-    for (int i = 0; i < 10; i++){
+    // if another command (or set of commands) written
+    char commands[maxArguments][BuffSize];
+    for (int i = 0; i < maxArguments; i++){
         strcpy(commands[i], "");
-    }
-    int i = 0;
-    while(con_args[i]){
-        int j = 0;
-        while(con_args[i][j]!='\0')
-            j++;
-        if (con_args[i][j-1]==','){
-            con_args[i][j-1] = '\0';
-            strcat(commands[counter], con_args[i]);
-            counter++;
-            i++;
-            continue;
-        }
-        strcat(commands[counter], con_args[i]);
-        strcat(commands[counter], " ");
-        i++;
-    }
+    }  
+    cmdRead = recognizeCommands(args, commands);
+    
 
-    counter++;
-    printf("Commands read: %d\n", counter);
-    char** con_args_new;
-    for (int i=0; i<counter; i++){
-        con_args_new = word_division(commands[i]);
+    for (int i=0; i<cmdRead; i++){
+        command = divideIntoWords(commands[i]);
         pid = fork();
         switch(pid){
-            case -1:
-            printf("Can't fork a process\n");
-            exit(0);
-            break;
-            case 0:
-            printf("Children process created = %d\n", getpid());
-            success = execvp(con_args_new[0], con_args_new);
-            if (success==-1){
-                printf("Command %s not found\n", con_args_new[0]);
-                kill(getpid(), SIGTERM);
-            }
-            break;
+            case forkError:
+                printf("Can't fork a process\n");
+                exit(0);
+                break;
+            case forkChild:
+                printf("Children process created = %d\n", getpid());
+                success = execvp(command[0], command);
+                if (success==execError){
+                    printf("Command %s not found\n", command[0]);
+                    kill(getpid(), SIGTERM);
+                }
+                break;
             default:
-            add_elem(pid);
-            sleep(1);
-            continue;
-            break;
+                add_elem(pid);
+                childAmount = countLength();
+                // wait for every child to end
+                for (int i=0; i<childAmount; i++){
+                    wait(NULL); 
+                }
+                break;
         }
     }
     getchar();
@@ -191,10 +285,10 @@ void create_new_process(char **con_args){
 }
 
 /*--Read the input line--*/
-void read_line(char** line){
+void readCmdInputLine(char** line){
     size_t len = 0;
     ssize_t read;
-    printf("033[38;5;63m$\033[0m");
+    printf("$");
     read = getline(line, &len, stdin);
     if (read==-1){
         printf("Error reading.\n");
@@ -214,9 +308,9 @@ void read_line(char** line){
 }
 
 /*--Delete all children processes--*/
-void kill_children(){
-    struct PID_list* current = head_list;
-    struct PID_list* next;
+void killAllChildren(){
+    struct ChildFIFO* current = head_list;
+    struct ChildFIFO* next;
     while(current!=NULL){
         next = current->next_process;
         kill(current->PID, SIGTERM);
@@ -226,36 +320,4 @@ void kill_children(){
         current = next;
     }
     head_list = NULL;
-}
-
-/*--main program--*/
-int main(){
-    char *line = NULL;
-    char **con_args;
-    system("clear");
-
-    signal(SIGINT, Ctrl_plus_C);
-    printf("\n");
-
-    while(true){
-        char cwd[256];
-        getcwd(cwd, sizeof(cwd));
-        printf("%s", cwd);
-        read_line(&line);
-        if(strcmp(line, "killall")==0){
-            kill_children();
-            free(line);
-            break;
-        }
-        else if(strcmp(line, "clear")==0){
-            system("clear");
-            continue;
-        }
-        else if(line[0]!='\0'){
-            con_args = word_division(line);
-            create_new_process(con_args);
-            free(con_args);
-        }
-    }
-    return 0;
 }
