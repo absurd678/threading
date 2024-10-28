@@ -27,6 +27,8 @@ const int lsPriority = 10;
 const int catPriority = 0;
 const int killallPriority = -5;
 const int clearPriority = -5;
+const int OthrApp = 5;
+const int NoPriority = -100;
 
 
 // ----------ERROR CONSTANTS ----------
@@ -38,6 +40,11 @@ const int ERR_EXTR_ARCH = 5;
 const int ERR_CRT_DIR = 6;
 const int ERR_EXTR = 7;
 const int ERR_PTH_ARCH = 8;
+const int NICE_BAD_OPTION = 9;
+const int NICE_BAD_PRIORITY = 10;
+const int NICE_BAD_ARGUMENTS = 11;
+const int ERR_PROC_UNFOUND = 12;
+const int ERR_MEM = 13;
 
 //-------------------STRUCTURES-----------------
 // TODO: make priority field, minPrior var (change each time the queue is changed)
@@ -77,7 +84,7 @@ void PrintErr(int errorCode);
 
 
 //----------------PROCESS FUNCTIONS----------------
-struct procInfo* findCommand(char **command, char cwd[BuffSize], int priority);
+int findCommand(char **command, char cwd[BuffSize], int* priority);
 void createChildProcess(char **args, char cwd[BuffSize]);
 
 void killHeadProcess(int sig);
@@ -85,7 +92,7 @@ void killHeadProcess(int sig);
 void killAllCommand(); // killall
 int lsCommand(char *dir); // ls
 int catCommand(char *filePath); // cat
-int niceCommand(char **command, char cwd[BuffSize]); // nice
+int niceCommand(char **command, char cwd[BuffSize], int *newPriority); // nice
 
 
 
@@ -99,12 +106,26 @@ int main(){
     printf("\n");
 
     while(true){
+        
         char cwd[BuffSize];
         getcwd(cwd, sizeof(cwd));
         printf("%s", cwd);
         readCmdInputLine(&line);
-        lexemCmdMatrix = divideIntoWords(line);
-        createChildProcess(lexemCmdMatrix, cwd);
+        if(strcmp(line, "killall")==0){
+            killAllCommand();
+            free(line);
+            break;
+        } 
+        else if(strcmp(line, "clear")==0){
+            system("clear");
+            continue;
+        }
+        else if(line[0]!='\0'){
+            lexemCmdMatrix = divideIntoWords(line);
+            createChildProcess(lexemCmdMatrix, cwd);
+            free(lexemCmdMatrix);
+        }
+        
     }
     return 0;
 }
@@ -161,9 +182,9 @@ int countLength(){
 void printAll(){
     struct ChildFIFO *current = head_list;
     int i = 1;
-    printf("\nChildren processes for parent %d:\n", getpid());
+    printf("\nAll processes:\n");
     while(current!=NULL){
-        printf("%d. Child process PID: %d Nice: %d\n", i, current->PID, current->niceLevel);
+        printf("%d. Process PID: %d Nice: %d\n", i, current->PID, current->niceLevel);
         current = current->nextProcess;
         i++;
     }
@@ -256,12 +277,19 @@ int recognizeCommands(char **args, char commands[maxArguments][BuffSize]){
 }
 
 /*--Create the new process--*/
+// ASK CHAT GPT WHY DOES NOT IT WORK. WHAT IS THE DIFFERENCE BETWEEN THIS FUNCTION AND THE OLD ONE. 
+// WHY THE FIFO REMAINS EMPTY?!
 void createChildProcess(char **args, char cwd[BuffSize]){
     pid_t pid;
-    struct procInfo *ans;
+    int findProcError = 0;
     int cmdRead = 0; // amount of command
     char** command; // array of command
     int childAmount = 0;
+    
+    int childPriority = NoPriority;
+    int* findPriority = &childPriority;
+    
+    
 
     // if cd command written 
     if(strcmp(args[0], "cd")==0){
@@ -287,6 +315,8 @@ void createChildProcess(char **args, char cwd[BuffSize]){
 
     for (int i=0; i<cmdRead; i++){
         command = divideIntoWords(commands[i]);
+        
+
         pid = fork();
         switch(pid){
             case forkError:
@@ -294,76 +324,93 @@ void createChildProcess(char **args, char cwd[BuffSize]){
                 exit(0);
                 break;
             case forkChild:
-                printf("Children process created = %d\n", getpid());
-                ans = findCommand(command, cwd, NULL);
-                if (ans->errCode!=0){
-                    printf("Command %s not found\n", command[0]);
-                    kill(getpid(), SIGTERM); 
+                printf("Children process created = %d with name: %s\n", getpid(), command[0]);
+                findProcError = findCommand(command, cwd, findPriority);
+                if (findProcError!=0){
+                    printf("Command %s not found\nPrintErr:\n", command[0]);
+                    
+                    PrintErr(findProcError);
+                    
+                    kill(getpid(), SIGTERM);
+                    break; 
                 }
+                // Передаем приоритет в родительский процесс
+                exit(*findPriority);
                 break;
             default:
-                add_elem(pid, ans->priority);
-                childAmount = countLength();
-                // wait for every child to end
-                for (int i=0; i<childAmount; i++){
-                    wait(NULL); 
-                }
+                int status;
+                waitpid(pid, &status, 0);
+                int findPriority = WEXITSTATUS(status);
+                add_elem(pid, findPriority);
+                printAll(); // DEBUG
                 break;
         }
     }
-    getchar();
+    //getchar();
+    
     return;
 }
 
-struct procInfo* findCommand(char **command, char cwd[BuffSize], int priority){
-    struct procInfo ans;
-    if (sizeof(command)==1){ // if ls, killall and other 1-word commands
-    if(strcmp(command[0], "killall")==0){
+
+int findCommand(char **command, char cwd[BuffSize], int* priority){
+    int ans;
+    
+    if(strcmp(command[0], "killall")==0){ // kill all processes
         setpriority(PRIO_PROCESS, 0, killallPriority);
         killAllCommand();
-        ans.errCode = 0; ans.priority = killallPriority;
-        return &ans;
+        *priority = killallPriority;
+        return 0;
     }
-    else if(strcmp(command[0], "clear")==0){
+    else if(strcmp(command[0], "clear")==0){ // clear 
         setpriority(PRIO_PROCESS, 0, clearPriority);
         system("clear");
-        ans.errCode = 0; ans.priority = clearPriority;
-        return &ans;
+        *priority = clearPriority;
+        return ans;
     }
-    else if(strcmp(command[0], "ls")==0){
-        if (priority==NULL)
-            priority = lsPriority;
-        setpriority(PRIO_PROCESS, 0, priority);
+    else if(strcmp(command[0], "ls")==0){ // ls
+        if (*priority==NoPriority)
+            *priority = lsPriority;
+        setpriority(PRIO_PROCESS, 0, *priority);
         if((processError = lsCommand(cwd))!=0){
-            PrintErr(processError);
+            return processError;
         }
-        ans.errCode = 0; ans.priority = priority;
-        return &ans;
-    } }
-    else if(command[0]!='\0'){
-        if(strcmp(command[0], "cat")==0){
-            if (priority==NULL)
-                priority = catPriority;
-            setpriority(PRIO_PROCESS, 0, priority);
-            char *filePath;
-            strcpy(filePath, cwd);
-            strcat(filePath, "/");
-            strcat(filePath, command[1]);
-            if ((processError = catCommand(filePath)) != 0)
-            {
-                PrintErr(processError);
-            }
-            ans.errCode = 0; ans.priority = priority;
-            return &ans;
+        return 0;
+    } 
+    else if(strcmp(command[0], "cat")==0){ // cat
+        if (*priority==NoPriority)
+            *priority = catPriority;
+        setpriority(PRIO_PROCESS, 0, *priority);
+        char *filePath = (char*)malloc(strlen(cwd)+strlen(command[1])+1);
+        if (filePath == NULL) {
+            perror("malloc failed");
+            return ERR_MEM;
         }
-        else if (strcmp(command[0], "nice")==0){
-            niceCommand(command, cwd);
-            ans.errCode = 0; ans.priority = priority;
-            return &ans;
+
+        strcpy(filePath, cwd);
+        strcat(filePath, "/");
+        strcat(filePath, command[1]);
+        if ((processError = catCommand(filePath)) != 0)
+        {
+            free(filePath);
+            return processError;
         }
+        free(filePath);
+        return 0;
     }
-    ans.errCode = 0; ans.priority = priority;
-    return &ans;
+        
+    else if (strcmp(command[0], "nice")==0){ // nice command
+        ans = niceCommand(command, cwd, priority);
+        return ans;
+    }    
+
+    else { // Launch other applications (firefox, etc)
+        if (*priority==NoPriority)
+            *priority = OthrApp;
+        setpriority(PRIO_PROCESS, 0, *priority);
+        ans = execvp(command[0], command);
+    }
+    
+    return ERR_PROC_UNFOUND;
 }
 
 /*--Read the input line--*/
@@ -405,7 +452,7 @@ void killAllCommand(){
 }
 
 
-int lsCommand(char *dir){
+int lsCommand(char dir[BuffSize]){
     DIR *dp;
     struct dirent *entry;
     struct stat statbuf;
@@ -436,6 +483,7 @@ int catCommand(char *filePath)
 
 
     FILE *fin = fopen(filePath, "r");
+    
 
     if (!fin)
     {
@@ -449,47 +497,35 @@ int catCommand(char *filePath)
     printf("\n");
     while ((total_bytes_read = fread(buffer, 1, BUFFSIZE1024, fin)) > 0)
     {
-        printf("%s\n", buffer);
+        fwrite(buffer, 1, total_bytes_read, stdout);
     }
 
     fclose(fin);
     return 0;
 }
 
-int niceCommand(char **command, char cwd[BuffSize]){
-    pid_t pid;
-    int newPriority;
-
-    pid = fork();
-    if(pid==forkError){
-        printf("Can't fork a process\n");
-        exit(0);
-    }
-    else if(pid==forkChild){
-        printf("Child process created = %d\n", getpid());
-        if (sizeof(command)==4){
-            if (strcmp(command[1], "-n")!=0){
-                return 0;//NICE_BAD_OPTION;
-            }
-            newPriority = atoi(command[2]);
-            if (newPriority >= -20 && newPriority <= 19){
-                printf("Priority of %s set to %d\n", command[4], newPriority);
-                char **solidCommand = sliceString(command, 4, sizeof(command)-1);
-                findCommand(solidCommand, cwd, newPriority);
-            } else {
-                return 0;//NICE_BAD_PRIORITY;
-            }
-
-        } else {
-            return 0;//NICE_BAD_ARGUMENTS;
+int niceCommand(char **command, char cwd[BuffSize], int *newPriority){
+    
+    if (sizeof(command)>=4){
+        if (strcmp(command[1], "-n")!=0){
+            return NICE_BAD_OPTION;
         }
-        getchar();
-        exit(0);
+        *newPriority = atoi(command[2]);
+        if (*newPriority >= -20 && *newPriority <= 19){
+            printf("\nPriority of %s set to %d\n", command[3], *newPriority);
+            char **solidCommand = sliceString(command, 3, sizeof(command)-1);
+            
+            return findCommand(solidCommand, cwd, newPriority);
+        } else {
+            return NICE_BAD_PRIORITY;
+        }
+
+    } else {
+        return NICE_BAD_ARGUMENTS;
     }
-    else{
-        waitpid(pid, NULL, 0);
-    }
-    return 1;
+    
+    
+    return 0;
 }
 
 char **sliceString(char **full, int start, int end){
