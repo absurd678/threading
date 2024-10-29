@@ -27,7 +27,7 @@ const int lsPriority = 10;
 const int catPriority = 0;
 const int killallPriority = -5;
 const int clearPriority = -5;
-const int OthrApp = 5;
+const int OthrApp = 0;
 const int NoPriority = -100;
 
 
@@ -327,12 +327,18 @@ void createChildProcess(char **args, char cwd[BuffSize]){
                 printf("Children process created = %d with name: %s\n", getpid(), command[0]);
                 findProcError = findCommand(command, cwd, findPriority);
                 if (findProcError!=0){
-                    printf("Command %s not found\nPrintErr:\n", command[0]);
-                    
-                    PrintErr(findProcError);
-                    
-                    kill(getpid(), SIGTERM);
-                    break; 
+                    *findPriority = OthrApp;
+                    setpriority(PRIO_PROCESS, 0, OthrApp);
+                    findProcError = execvp(command[0], command);
+
+                    if (findProcError ==-1) {
+                        printf("Command %s not found\nPrintErr:\n", command[0]);
+                        PrintErr(findProcError);
+                        kill(getpid(), SIGTERM);
+                        exit(NoPriority);
+                        break;
+                    }
+                     
                 }
                 // Передаем приоритет в родительский процесс
                 exit(*findPriority);
@@ -341,8 +347,10 @@ void createChildProcess(char **args, char cwd[BuffSize]){
                 int status;
                 waitpid(pid, &status, 0);
                 int findPriority = WEXITSTATUS(status);
-                add_elem(pid, findPriority);
-                printAll(); // DEBUG
+                if (findPriority!=NoPriority){
+                    add_elem(pid, findPriority);
+                }
+                printAll();
                 break;
         }
     }
@@ -402,14 +410,14 @@ int findCommand(char **command, char cwd[BuffSize], int* priority){
         ans = niceCommand(command, cwd, priority);
         return ans;
     }    
-
+/*
     else { // Launch other applications (firefox, etc)
         if (*priority==NoPriority)
             *priority = OthrApp;
         setpriority(PRIO_PROCESS, 0, *priority);
         ans = execvp(command[0], command);
     }
-    
+*/  
     return ERR_PROC_UNFOUND;
 }
 
